@@ -1,0 +1,467 @@
+#!/bin/bash
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3, or (at your option)
+# any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software Foundation,
+# Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+
+# Written by Alastor Pilkine <alastor.pilkine@gmail.com>.
+
+VERSION=1
+# Creation
+
+PGM=`basename $0`
+MOUNT_DIR="/root2"
+
+if [ `id -u` != 0 ]
+then
+    echo -e "Error $PGM needs to be run as root !\n"
+    exit 1
+fi
+
+if ! rsync --version > /dev/null
+then
+    echo -e "\Error $PGM needs the rsync program but cannot find it."
+    echo "Make sure rsync is installed:"
+    echo "    $ sudo apt-get update"
+    echo -e "    $ sudo apt-get install rsync\n"
+    exit 1
+fi
+
+
+usage()
+    {
+    echo "
+$PGM - Commit/Rollback the active / partition on a second ext4 partition on the same SD.
+
+usage $PGM [COMMAND] [OPTIONS]
+
+command:
+    -c|--commit		commit the active partition on the inactive
+    -h|--help		display this help and exit
+    -i|--info		show information about partition, last commit
+    -u|--umount		unmout the inactive partition from $MOUNT_DIR
+    -r|--rollback	change the startup partition to the inactive one
+                        and ask if you want to reboot.
+                        Don't forget to commit after the rollback !
+    -m|--mount		mount the inactive partition on $MOUNT_DIR folder
+
+option:
+    -e|--exclude	work only with -c|--commit, have to be the last option.
+                        specify a list of folders, separated by blank, to not commit !
+                        if folders exist on inactive partition, they are keep unchanged
+    	ex : $PGM -c -e /home/pi/fisrt_folder /home/pi/second_folder
+
+    -v|--verbose	work only with -c|--commit. List the commited files.
+    "
+    exit 0
+    }
+
+part_umount()
+# return code
+# 1 : error while unmounting partition
+# 2 : folder exist but not used for inactive partition
+# 3 : error deleting folder
+# 4 : mount folder don't exist, partition not mount
+    {
+    local PARTITION=$1
+    local DIRECTORY=$2
+    if [ -d $DIRECTORY ]
+    then
+        if [ `mount | grep "$PARTITION on $DIRECTORY" | wc -l` -eq 1 ]
+        then
+            if ! umount $DIRECTORY
+            then
+                return 1
+            fi
+        else
+            return 2
+        fi
+        if ! rmdir $DIRECTORY > /dev/null
+        then
+            return 3
+        fi
+        # SUCCESS
+        return 0
+    else
+        return 4
+    fi
+    }
+
+part_mount()
+# return code
+# 1 : error while creating folder
+# 2 : error while mountig unactive partition
+# 3 : folder exists but not used for unactive partition
+# 4 : partition already mounted
+    {
+    local PARTITION=$1
+    local DIRECTORY=$2
+    if [ ! -d $DIRECTORY ]
+    then
+        if ! mkdir $DIRECTORY
+        then
+            return 1
+        fi
+        if ! mount $PARTITION $DIRECTORY
+        then
+            rmdir $DIRECTORY
+            return 2
+        else
+            # SUCCESS
+            return 0
+        fi
+    else
+        if [ `mount | grep "$PARTITION on $DIRECTORY" | wc -l` -eq 1 ]
+        then
+            return 4
+        else
+            return 3
+        fi
+    fi
+    }
+
+
+if [ "$1" = "" ]
+then
+    echo "Bad args"
+    usage
+fi
+
+EXCEPT=false
+COMMIT=false
+ROLLBACK=false
+INFO=false
+USER_EXCEPT_DIR=""
+
+while [ "$1" ]
+do
+    case "$1" in
+        -v|--verbose)
+            RSYNC_OPTIONS=${RSYNC_OPTIONS}v
+            ;;
+        -c|--commit)
+            if [ $ROLLBACK = "true" ]
+            then
+                echo "Bad args"
+                usage
+            fi
+            COMMIT=true
+            ;;
+        -h|--help)
+            usage
+            ;;
+        -m|--mount)
+            SHOW="true"
+            ;;
+        -u|--umount)
+            MASK="true"
+            ;;
+        -r|--rollback)
+            if [ $COMMIT = "true" ]
+            then
+                echo "Bad args"
+                usage
+            fi
+            ROLLBACK=true;
+            ;;
+        -e|--except)
+            EXCEPT=true;
+            ;;
+        -i|--info)
+            INFO=true;
+            ;;
+        *)
+            if [ "$COMMIT" = "false" ] || \
+               [ "$ROLLBACK" = "true" ] || \
+               [ "$EXCEPT" = "false" ]
+            then
+                echo "Bad args"
+                usage
+            fi
+            USER_EXCEPT_DIR=${USER_EXCEPT_DIR}" --exclude $1"
+            ;;
+    esac
+    shift
+done
+
+if [ "$USER_EXCEPT_DIR" = "" ] && [ "$EXCEPT" = "true" ]
+then
+    echo "Bad args"
+    usage
+fi
+
+# root partition actualy mount on /
+CURRENT_ROOT=`parted /dev/root -ms p | grep "/dev/" | cut -f 1 -d ":"`
+# all indice of ext4 partition on mmcblk0, the SD card
+ALL_AVAILABLE_ROOT=`parted /dev/mmcblk0 -ms p | grep ext4 | cut -f 1 -d ":"`
+# root partition specified in /boot/cmdline.txt file
+CMD_FILE_ROOT=`cat /boot/cmdline.txt | sed y'/ /\n/' | grep "root=" | cut -f 2 -d '='`
+# root partition specified in /etc/fstab file
+FSTAB_FILE_ROOT=`cat /etc/fstab | grep " / " | cut -f 1 -d " "`
+WARNING=false
+
+FIRST_ROOT=""
+SECOND_ROOT=""
+for index in $ALL_AVAILABLE_ROOT
+do
+   if [ $index -eq 2 ]
+   then
+      FIRST_ROOT="/dev/mmcblk0p"$index
+   elif [ $index -eq 3 ]
+   then
+      SECOND_ROOT="/dev/mmcblk0p"$index
+   else
+      WARNING=true
+   fi
+done
+
+if [ "$FIRST_ROOT" = "" ] || [ "$SECOND_ROOT" = "" ]
+then
+   echo "ERROR - Root mmcblk0p2 and/or mmcblk0p3 partitions not available for commit/rollback !!"
+   exit 1 
+fi
+
+if [ "$CURRENT_ROOT" = "$FIRST_ROOT" ]
+then
+   DEST_ROOT=$SECOND_ROOT
+else
+   DEST_ROOT=$FIRST_ROOT
+fi
+
+
+if [ "$CMD_FILE_ROOT" = "$FSTAB_FILE_ROOT" ]
+then
+   ROOT_COHERENCY="OK"
+else
+   ROOT_COHERENCY="KO"
+fi
+
+if [ "$INFO" = "true" ]
+then
+   echo
+   echo "Current root is : $CURRENT_ROOT"
+   echo
+   echo "Available ext4 partition are :"
+   for index in $ALL_AVAILABLE_ROOT
+   do
+     echo -e "\t/dev/mmcblk0p$index"
+   done
+   echo
+   echo "Usable root partition are :"
+   echo -e "\t$FIRST_ROOT"
+   echo -e "\t$SECOND_ROOT"
+   if [ "$WARNING" = "true"  ]
+   then
+      echo "Warning : there's more than two ext4 partition on the SD !"
+   fi
+   echo
+   echo "Root use at boot time :"
+   echo "in /boot/cmdline.txt : $CMD_FILE_ROOT"
+   echo "in /etc/fstab        : $FSTAB_FILE_ROOT"
+   echo "Root coherency at boot is : $ROOT_COHERENCY"
+   echo
+   echo "Partition for commit/rollback is : $DEST_ROOT"
+   echo
+   echo "Checking for last commit date"
+   part_mount $DEST_ROOT $MOUNT_DIR
+   if [ $? != 0 ]
+   then
+        echo "Error while mounting unactive partition !"
+        echo "run '$PGM --mount' for more information !"
+        exit 1
+   fi
+   echo -e "\tlast commit : `ls -lh $MOUNT_DIR/etc/fstab | cut -f '6 7 8' -d ' '`"
+   part_umount $DEST_ROOT $MOUNT_DIR
+   if [ $? != 0 ]
+   then
+        echo "Error while unmouting unactive partition !"
+        echo "run '$PGM --umount' for more information !"
+        exit 1
+   fi
+   exit 0
+fi
+
+if [ "$SHOW" = "true" ]
+then
+  part_mount $DEST_ROOT $MOUNT_DIR
+  case $? in
+    0)
+        echo "$DEST_ROOT successfully mount on $MOUNT_DIR"
+        exit 0
+        ;;
+    1)
+        echo "Error : unable to create $MOUNT_DIR !"
+        exit 1
+        ;;
+    2)
+        echo "Error : unable to mount $DEST_ROOT on $MOUNT_DIR !"
+        exit 2
+        ;;
+    3)
+        echo "Error : folder $MOUNT_DIR already exists !"
+        exit 3
+        ;;
+    4)
+        echo "Warning : Partition is already mount !"
+        exit 0
+        ;;
+    *)
+        echo "Unkown error !!!"
+        exit 9
+        ;;
+   esac
+fi
+
+if [ "$MASK" = "true" ]
+then
+   part_umount $DEST_ROOT $MOUNT_DIR
+  case $? in
+    0)
+        echo "$DEST_ROOT successfully unmount, $MOUNT_DIR is delete"
+        exit 0
+        ;;
+    1)
+        echo "Error : unable to unmout partition !"
+        exit 1
+        ;;
+    2)
+        echo "Error : folder $MOUNT_DIR exists but is not used for $DEST_ROOT"
+        exit 2
+        ;;
+    3)
+        echo "Error : unable to delete $MOUNT_DIR"
+        exit 3
+        ;;
+    4)
+        echo "Warning : Partition was not previously mount, no need to unmount !"
+        exit 0
+        ;;
+    *)
+        echo "Unkown error !!!"
+        exit 9
+        ;;
+   esac
+fi
+
+if [ "$COMMIT" = "true" ]
+then
+   echo
+   echo "Do you want to commit from $CURRENT_ROOT to $DEST_ROOT ? (y/n)"
+   read resp
+   if [ "$resp" != "y" ]
+   then
+     exit 0
+   fi
+
+   part_mount $DEST_ROOT $MOUNT_DIR
+   if [ $? != 0 ]
+   then
+        echo "Error while mouting unactive partition !!!"
+        echo "run '$PGM --mount' for more information"
+        exit 1
+   fi
+   # get from rpi-clone
+   if [ -f /etc/dphys-swapfile ]
+   then
+    SWAPFILE=`cat /etc/dphys-swapfile | grep ^CONF_SWAPFILE | cut -f 2 -d=`
+    if [ "$SWAPFILE" = "" ]
+    then
+        SWAPFILE=/var/swap
+    fi
+    EXCLUDE_SWAPFILE="--exclude $SWAPFILE"
+   fi
+
+   START_TIME=`date '+%H:%M:%S'`
+   # get from rpi-clone
+   # Exclude fuse mountpoint .gvfs, various other mount points, and tmpfs
+   # file systems from the rsync.
+   #
+   RSYNC_OPTIONS="--force -rltWDEgopt"
+
+   echo "Starting the filesystem commit to $DEST_ROOT at $START_TIME"
+   echo "(This may take several minutes)..."
+   rsync $RSYNC_OPTIONS --delete \
+        $EXCLUDE_SWAPFILE \
+        $USER_EXCEPT_DIR \
+        --exclude '.gvfs' \
+        --exclude '/dev' \
+        --exclude '/media' \
+        --exclude '/mnt' \
+        --exclude '/proc' \
+        --exclude '/run' \
+        --exclude '/sys' \
+        --exclude '/tmp' \
+        --exclude $MOUNT_DIR \
+        --exclude 'lost\+found' \
+    // \
+    $MOUNT_DIR
+    echo "Doing some extra work !"
+    echo
+    # get from rpi-clone
+    for i in dev media mnt proc run sys
+    do
+        if [ ! -d $MOUNT_DIR/$i ]
+        then
+            mkdir $MOUNT_DIR/$i
+        fi
+    done
+
+    if [ ! -d $MOUNT_DIR/tmp ]
+        then
+            mkdir $MOUNT_DIR/tmp
+            chmod a+w $MOUNT_DIR/tmp
+        fi
+    # modifying fstab on inactive partition
+    sed -i -e "s/`basename $CURRENT_ROOT`/`basename $DEST_ROOT`/g" "$MOUNT_DIR/etc/fstab"
+    part_umount $DEST_ROOT $MOUNT_DIR
+    if [ $? != 0 ]
+    then
+        echo "Error while unmouting unactive partition !!!"
+        echo "run '$PGM --umount' for more information"
+        exit 1
+    else
+        END_TIME=`date '+%H:%M:%S'`
+        echo "Commit ended at $END_TIME !"
+        exit 0
+    fi
+fi
+
+if [ "$ROLLBACK" = "true" ]
+then
+   echo 
+   echo "Do you want to rollback from $CURRENT_ROOT to $DEST_ROOT ? (y/n)"
+   read resp
+   if [ "$resp" != "y" ]
+   then
+      exit 0
+   fi
+   echo
+   echo "Actual /boot/cmdline.txt : "
+   cat /boot/cmdline.txt | sed y'/ /\n/' | grep "root="
+   echo
+   echo "Modifying /boot/cmdline.txt"
+   sed -i -e "s/`basename $CURRENT_ROOT`/`basename $DEST_ROOT`/g" "/boot/cmdline.txt"
+   echo "New /boot/cmdline.txt :"
+   cat /boot/cmdline.txt | sed y'/ /\n/' | grep "root="
+   echo
+   echo "Do you want to reboot now ? (y/n)"
+   echo "Don't forget to commit after reboot !"
+   read resp
+   if [ "$resp" = "y" ]
+   then
+      reboot
+   else
+      echo "Warning, you will automatically rollback at next reboot !!!"
+   fi
+   exit 0
+fi
