@@ -16,8 +16,9 @@
 
 # Written by Alastor Pilkine <alastor.pilkine@gmail.com>.
 
-VERSION=1
+VERSION=1.01
 # Creation
+# internal name coherency
 
 PGM=`basename $0`
 MOUNT_DIR="/root2"
@@ -161,10 +162,10 @@ do
             usage
             ;;
         -m|--mount)
-            SHOW="true"
+            MOUNT="true"
             ;;
         -u|--umount)
-            MASK="true"
+            UMOUNT="true"
             ;;
         -r|--rollback)
             if [ $COMMIT = "true" ]
@@ -201,7 +202,7 @@ then
 fi
 
 # root partition actualy mount on /
-CURRENT_ROOT=`parted /dev/root -ms p | grep "/dev/" | cut -f 1 -d ":"`
+ACTIVE_PARTITION=`parted /dev/root -ms p | grep "/dev/" | cut -f 1 -d ":"`
 # all indice of ext4 partition on mmcblk0, the SD card
 ALL_AVAILABLE_ROOT=`parted /dev/mmcblk0 -ms p | grep ext4 | cut -f 1 -d ":"`
 # root partition specified in /boot/cmdline.txt file
@@ -231,11 +232,11 @@ then
    exit 1 
 fi
 
-if [ "$CURRENT_ROOT" = "$FIRST_ROOT" ]
+if [ "$ACTIVE_PARTITION" = "$FIRST_ROOT" ]
 then
-   DEST_ROOT=$SECOND_ROOT
+   INACTIVE_PARTITION=$SECOND_ROOT
 else
-   DEST_ROOT=$FIRST_ROOT
+   INACTIVE_PARTITION=$FIRST_ROOT
 fi
 
 
@@ -249,7 +250,7 @@ fi
 if [ "$INFO" = "true" ]
 then
    echo
-   echo "Current root is : $CURRENT_ROOT"
+   echo "Current root is : $ACTIVE_PARTITION"
    echo
    echo "Available ext4 partition are :"
    for index in $ALL_AVAILABLE_ROOT
@@ -270,10 +271,10 @@ then
    echo "in /etc/fstab        : $FSTAB_FILE_ROOT"
    echo "Root coherency at boot is : $ROOT_COHERENCY"
    echo
-   echo "Partition for commit/rollback is : $DEST_ROOT"
+   echo "Partition for commit/rollback is : $INACTIVE_PARTITION"
    echo
    echo "Checking for last commit date"
-   part_mount $DEST_ROOT $MOUNT_DIR
+   part_mount $INACTIVE_PARTITION $MOUNT_DIR
    if [ $? != 0 ]
    then
         echo "Error while mounting unactive partition !"
@@ -281,7 +282,7 @@ then
         exit 1
    fi
    echo -e "\tlast commit : `ls -lh $MOUNT_DIR/etc/fstab | cut -f '6 7 8' -d ' '`"
-   part_umount $DEST_ROOT $MOUNT_DIR
+   part_umount $INACTIVE_PARTITION $MOUNT_DIR
    if [ $? != 0 ]
    then
         echo "Error while unmouting unactive partition !"
@@ -291,12 +292,12 @@ then
    exit 0
 fi
 
-if [ "$SHOW" = "true" ]
+if [ "$MOUNT" = "true" ]
 then
-  part_mount $DEST_ROOT $MOUNT_DIR
+  part_mount $INACTIVE_PARTITION $MOUNT_DIR
   case $? in
     0)
-        echo "$DEST_ROOT successfully mount on $MOUNT_DIR"
+        echo "$INACTIVE_PARTITION successfully mount on $MOUNT_DIR"
         exit 0
         ;;
     1)
@@ -304,7 +305,7 @@ then
         exit 1
         ;;
     2)
-        echo "Error : unable to mount $DEST_ROOT on $MOUNT_DIR !"
+        echo "Error : unable to mount $INACTIVE_PARTITION on $MOUNT_DIR !"
         exit 2
         ;;
     3)
@@ -322,12 +323,12 @@ then
    esac
 fi
 
-if [ "$MASK" = "true" ]
+if [ "$UMOUNT" = "true" ]
 then
-   part_umount $DEST_ROOT $MOUNT_DIR
+   part_umount $INACTIVE_PARTITION $MOUNT_DIR
   case $? in
     0)
-        echo "$DEST_ROOT successfully unmount, $MOUNT_DIR is delete"
+        echo "$INACTIVE_PARTITION successfully unmount, $MOUNT_DIR is delete"
         exit 0
         ;;
     1)
@@ -335,7 +336,7 @@ then
         exit 1
         ;;
     2)
-        echo "Error : folder $MOUNT_DIR exists but is not used for $DEST_ROOT"
+        echo "Error : folder $MOUNT_DIR exists but is not used for $INACTIVE_PARTITION"
         exit 2
         ;;
     3)
@@ -356,14 +357,14 @@ fi
 if [ "$COMMIT" = "true" ]
 then
    echo
-   echo "Do you want to commit from $CURRENT_ROOT to $DEST_ROOT ? (y/n)"
+   echo "Do you want to commit from $ACTIVE_PARTITION to $INACTIVE_PARTITION ? (y/n)"
    read resp
    if [ "$resp" != "y" ]
    then
      exit 0
    fi
 
-   part_mount $DEST_ROOT $MOUNT_DIR
+   part_mount $INACTIVE_PARTITION $MOUNT_DIR
    if [ $? != 0 ]
    then
         echo "Error while mouting unactive partition !!!"
@@ -388,7 +389,7 @@ then
    #
    RSYNC_OPTIONS="--force -rltWDEgopt"
 
-   echo "Starting the filesystem commit to $DEST_ROOT at $START_TIME"
+   echo "Starting the filesystem commit to $INACTIVE_PARTITION at $START_TIME"
    echo "(This may take several minutes)..."
    rsync $RSYNC_OPTIONS --delete \
         $EXCLUDE_SWAPFILE \
@@ -422,8 +423,8 @@ then
             chmod a+w $MOUNT_DIR/tmp
         fi
     # modifying fstab on inactive partition
-    sed -i -e "s/`basename $CURRENT_ROOT`/`basename $DEST_ROOT`/g" "$MOUNT_DIR/etc/fstab"
-    part_umount $DEST_ROOT $MOUNT_DIR
+    sed -i -e "s/`basename $ACTIVE_PARTITION`/`basename $INACTIVE_PARTITION`/g" "$MOUNT_DIR/etc/fstab"
+    part_umount $INACTIVE_PARTITION $MOUNT_DIR
     if [ $? != 0 ]
     then
         echo "Error while unmouting unactive partition !!!"
@@ -439,7 +440,7 @@ fi
 if [ "$ROLLBACK" = "true" ]
 then
    echo 
-   echo "Do you want to rollback from $CURRENT_ROOT to $DEST_ROOT ? (y/n)"
+   echo "Do you want to rollback from $ACTIVE_PARTITION to $INACTIVE_PARTITION ? (y/n)"
    read resp
    if [ "$resp" != "y" ]
    then
@@ -450,7 +451,7 @@ then
    cat /boot/cmdline.txt | sed y'/ /\n/' | grep "root="
    echo
    echo "Modifying /boot/cmdline.txt"
-   sed -i -e "s/`basename $CURRENT_ROOT`/`basename $DEST_ROOT`/g" "/boot/cmdline.txt"
+   sed -i -e "s/`basename $ACTIVE_PARTITION`/`basename $INACTIVE_PARTITION`/g" "/boot/cmdline.txt"
    echo "New /boot/cmdline.txt :"
    cat /boot/cmdline.txt | sed y'/ /\n/' | grep "root="
    echo
