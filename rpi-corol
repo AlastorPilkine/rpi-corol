@@ -22,6 +22,7 @@ VERSION=1.01
 
 PGM=`basename $0`
 MOUNT_DIR="/root2"
+RSYNC_OPTIONS="--force -rltWDEgopt"
 
 if [ `id -u` != 0 ]
 then
@@ -387,7 +388,6 @@ then
    # Exclude fuse mountpoint .gvfs, various other mount points, and tmpfs
    # file systems from the rsync.
    #
-   RSYNC_OPTIONS="--force -rltWDEgopt"
 
    echo "Starting the filesystem commit to $INACTIVE_PARTITION at $START_TIME"
    echo "(This may take several minutes)..."
